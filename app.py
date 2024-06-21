@@ -1,125 +1,154 @@
-import streamlit as st
-from PIL import Image
-import requests
-from io import BytesIO
-from image_data import image_data
-from video_data import video_data
-import PyPDF2
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain_core.messages import HumanMessage
+import json
+from langchain_community.vectorstores import FAISS
+from langchain.schema.document import Document 
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_cohere import ChatCohere
+from langchain_core.messages import HumanMessage
+import PyPDF2
 
-file = st.file_uploader('Upload a PDF file' , type = ['pdf'])
+import streamlit as st 
 
-if file is not None : 
+sample_json = json.load(open('base.json'))
 
-    pdf = PyPDF2.PdfReader(file)
+documents = []
 
-    text = ' '.join([
-        pdf.pages[page_number].extract_text()
-        for page_number 
-        in range(len(pdf.pages))
-    ])
+for doc in sample_json : 
 
-    chunks = [
-        text[index : index + 1024]
-        for index 
-        in range(0 , len(text) , 1024)
-    ]
+    documents.append(Document(
+        page_content = doc['page_content'] , 
+        metadata = {
+            'type' : doc['type'] , 
+            'url' : doc['url']
+        }
+    ))
 
-    chat = ChatCohere(cohere_api_key = 'FELFXgLGfcqsy4eh4Q75dXNT7VyIQjKZmhkiIug3')
-    embeddings = HuggingFaceEmbeddings(model_name = 'all-MiniLM-L6-v2')
-    vectorstore = FAISS.from_texts(chunks , embeddings)
+embedding = HuggingFaceEmbeddings(
+        model_name = 'all-MiniLM-L6-v2'
+    )
 
-    query = st.text_input('Enter your query')
+base_vc = FAISS.from_documents(
+    documents , 
+    embedding = embedding
+)
 
-    if st.button('Search') :
+base_vc.save_local('vc')
 
-        similar_docs = vectorstore.similarity_search(query)
-        context = ' '.join([
-            similar_doc.page_content
-            for similar_doc
-            in similar_docs
+json_file = st.file_uploader('Upload the json file' , type = ['json'])
+pdf_file = st.file_uploader('Upload the pdf file' , type = ['pdf'])
+query = st.text_input('Query')
+
+if st.button('Ask') : 
+
+    ret_j_vc = FAISS.load_local('vc' , embeddings = embedding , allow_dangerous_deserialization = True)
+    ret_p_vc = FAISS.load_local('vc' , embeddings = embedding , allow_dangerous_deserialization = True)
+    if json_file : 
+
+        documents = []
+
+        for doc in json.load(json_file) : 
+
+            documents.append(Document(
+                page_content = doc['page_content'] , 
+                metadata = {
+                    'type' : doc['type'] , 
+                    'url' : doc['url']
+                }
+            ))
+
+        ret_j_vc = FAISS.from_documents(
+            documents , 
+            embedding = HuggingFaceEmbeddings(
+                model_name = 'all-MiniLM-L6-v2'
+            )
+        )
+
+    if pdf_file : 
+
+        pdf = PyPDF2.PdfReader(pdf_file)
+
+        text = ' '.join([
+            pdf.pages[page_number].extract_text()
+            for page_number 
+            in range(len(pdf.pages))
         ])
 
-        prompt = '''
+        chunks = [
+            text[index : index + 1024]
+            for index 
+            in range(0 , len(text) , 1024)
+        ]
+
+        for chunk in chunks : 
+
+            documents.append(
+                Document(
+                    page_content = chunk , 
+                    metadata = {
+                        'type' : 'text' , 
+                        'url' : ''    
+                    }
+                ))
+
+        ret_p_vc = FAISS.from_documents(
+            documents , 
+            embedding = HuggingFaceEmbeddings(
+                model_name = 'all-MiniLM-L6-v2'
+            )
+        )
+
+
+    bsdocs = base_vc.similarity_search(query)
+    rsdocs = ret_j_vc.similarity_search(query)
+    psdocs = ret_p_vc.similarity_search(query)
+
+    st.sidebar.write(bsdocs)
+    st.sidebar.write(rsdocs)
+    st.sidebar.write(psdocs)
+
+    context = ' '.join([val.page_content for val in bsdocs]) + ' '.join([val.page_content for val in rsdocs]) + ' '.join([val.page_content for val in psdocs])
+
+    images = [val.metadata['url'] for val in bsdocs if val.metadata['type'] == 'image'] + [val.metadata['url'] for val in rsdocs if val.metadata['type'] == 'image'] + [val.metadata['url'] for val in psdocs if val.metadata['type'] == 'image']
+
+    prompt = '''
 You are a conversational chatbot, your task is to answer questions based on the context provided.
 
-Try to answer in markdown format. to format, images or any links as well
-
-Your code will be directly sent to a markdown renderer
+If the provided context does not match with query - just output 'No Specific context was provided for this query' and do not answer the query further
 
 Context : {}
 
 Query : {}
+    '''
+
+    chat = ChatCohere(cohere_api_key = 'vJZr4T4bWAJMn0kOdkSN1pmjxzrqLlPOy1YaA3fa')
+    prompt = prompt.format(context , query)
+
+    messages = [HumanMessage(content = prompt)]
+    
+    response = chat.invoke(messages).content
+
+    st.write(response)
+
+    for img in images : 
+
+        st.markdown(
+            f'''
+            ![Image]({img})
+            '''
+        )
+
+    mark_image = '\n'.join([
+        f'''
+        ![Image]({img})
         '''
-
-        prompt = prompt.format(context , query)
-
-        messages = [HumanMessage(content = prompt)]
-
-        response = chat.invoke(messages).content
-
-        open('file.txt' , 'w').write(response)
-
-        st.markdown(response)
-
-# Function to load image from a URL
-def load_image(url):
-    response = requests.get(url)
-    response.raise_for_status()
-    img = Image.open(BytesIO(response.content))
-    return img
-
-# Function to search for images based on query
-def search_images(query):
-    results = []
-    query_lower = query.lower()
-    for image in image_data:
-        if any(query_lower in tag.lower() for tag in image["tags"]):
-            results.append(image["url"])
-    return results
-
-# Streamlit app
-st.title("Image Search App")
-
-# Input form for user query
-query = st.text_input("Enter a query to search for images:")
-
-# Search and display the images
-if query:
-    matched_images = search_images(query)
-    if matched_images:
-        st.write(f"Found {len(matched_images)} images for query: '{query}'")
-        for url in matched_images:
-            img = load_image(url)
-            st.image(img, caption=url.split('/')[-1], use_column_width=True)
-    else:
-        st.write(f"No images found for query: '{query}'")
+        for img in images
+    ])
 
 
-# Function to search for videos based on query
-def search_videos(query):
-    results = []
-    query_lower = query.lower()
-    for video in video_data:
-        if any(query_lower in tag.lower() for tag in video["tags"]):
-            results.append(video["url"])
-    return results
-
-# Streamlit app
-st.title("Video Search App")
-
-# Input form for user query
-query = st.text_input("Enter a query to search for videos:")
-
-# Search and display the videos
-if query:
-    matched_videos = search_videos(query)
-    if matched_videos:
-        st.write(f"Found {len(matched_videos)} videos for query: '{query}'")
-        for url in matched_videos:
-            st.video(url, start_time=0)
-    else:
-        st.write(f"No videos found for query: '{query}'")
+    st.sidebar.markdown(response)
+    st.sidebar.markdown(
+        f'''
+        ```
+        {mark_image}
+        ```
+        '''
+    )
